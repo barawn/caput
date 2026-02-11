@@ -253,7 +253,7 @@ class _BaseGroup(_MemObjMixin, collections.Mapping):
     @property
     def distributed(self):
         return getattr(self._storage_root, 'distributed', False)
-       
+
     @property
     def attrs(self):
         """Attributes attached to this object.
@@ -640,21 +640,21 @@ class MemGroup(_BaseGroup):
 
         dset = self[name]
 
-        if dset.distributed:
-            warnings.warn('%s is already a distributed dataset, redistribute it along the required axis %d' % (name, distributed_axis))
+        distributed_axis = distributed_axis if distributed_axis >= 0 else distributed_axis + len(dset.shape)
+
+        if dset.distributed and dset.distributed_axis == distributed_axis:
+            warnings.warn('%s is already a distributed dataset with the required distribution axis %d' % (name, distributed_axis))
+            return dset
+        elif dset.distributed:
+            warnings.warn('%s is already a distributed dataset with distribution axis %d, redistribute it along the required axis %d' % (name, dset.distributed_axis, distributed_axis))
             dset.redistribute(distributed_axis)
             return dset
 
-        dset_shape = dset.shape
-        dset_type = dset.dtype
-        dist_len = dset_shape[distributed_axis]
-        ld, sd, ed = mpiutil.split_local(dist_len, comm=self.comm)
-        md = mpiarray.MPIArray(dset_shape, axis=distributed_axis, comm=self.comm, dtype=dset_type)
-        md.local_array[:] = dset[sd:ed].copy()
+        md = mpiarray.MPIArray.from_numpy_array(dset[:], axis=distributed_axis, root=None, comm=self.comm)
         attr_dict = {} # temporarily save attrs of this dataset
         copyattrs(dset.attrs, attr_dict)
         del dset
-        new_dset = self.create_dataset(name, shape=dset_shape, dtype=dset_type, data=md, distributed=True, distributed_axis=distributed_axis)
+        new_dset = self.create_dataset(name, shape=md.shape, dtype=md.dtype, data=md, distributed=True, distributed_axis=distributed_axis)
         copyattrs(attr_dict, new_dset.attrs)
 
         return new_dset
@@ -679,18 +679,11 @@ class MemGroup(_BaseGroup):
             warnings.warn('%s is already a common dataset, no need to convert' % name)
             return dset
 
-        dset_shape = dset.shape
-        dset_type = dset.dtype
-        global_array = np.zeros(dset_shape, dtype=dset_type)
-        local_start = dset.local_offset
-        nproc = 1 if self.comm is None else self.comm.size
-        # gather local distributed dataset to a global array for all procs
-        for rank in range(nproc):
-            mpiutil.gather_local(global_array, dset.local_data, local_start, root=rank, comm=self.comm)
+        global_array = dset.data.to_numpy_array(root=None)
         attr_dict = {} # temporarily save attrs of this dataset
         copyattrs(dset.attrs, attr_dict)
         del dset
-        new_dset = self.create_dataset(name, data=global_array, shape=dset_shape, dtype=dset_type)
+        new_dset = self.create_dataset(name, data=global_array)
         copyattrs(attr_dict, new_dset.attrs)
 
         return new_dset
@@ -768,8 +761,10 @@ class MemDatasetCommon(MemDataset):
 
     Attributes
     ----------
+    comm
     common
     distributed
+    distributed_axis
     data
     local_data
     shape
@@ -821,7 +816,11 @@ class MemDatasetCommon(MemDataset):
     @property
     def distributed(self):
         return False
-    
+
+    @property
+    def distributed_axis(self):
+        return None
+
     @property
     def data(self):
         return self._data
@@ -878,8 +877,10 @@ class MemDatasetDistributed(MemDataset):
 
     Attributes
     ----------
+    comm
     common
     distributed
+    distributed_axis
     data
     local_data
     shape
@@ -887,8 +888,6 @@ class MemDatasetDistributed(MemDataset):
     local_shape
     local_offset
     dtype
-    comm
-    distributed_axis
 
     """
 

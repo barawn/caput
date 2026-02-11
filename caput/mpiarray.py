@@ -207,7 +207,7 @@ class _global_resolver(object):
             if slobj[self.axis] is None:
                 return None
             else:
-                return self.array[slobj].view(np.ndarray)
+                return self.array[tuple(slobj)].view(np.ndarray)
 
         else:
 
@@ -215,7 +215,7 @@ class _global_resolver(object):
             slobj = [ slice(None, None, None) if sl is None else sl for sl in slobj ]
 
             # Return an MPIArray view
-            arr = self.array[slobj]
+            arr = self.array[tuple(slobj)]
 
             # Figure out which is the distributed axis after the slicing, by
             # removing slice axes which are just ints from the mapping
@@ -229,7 +229,7 @@ class _global_resolver(object):
 
         if slobj[self.axis] is None:
             return
-        self.array[slobj] = value
+        self.array[tuple(slobj)] = value
 
 
 class MPIArray(np.ndarray):
@@ -261,6 +261,8 @@ class MPIArray(np.ndarray):
 
     Methods
     -------
+    from_numpy_array
+    to_numpy_array
     wrap
     redistribute
     enumerate
@@ -316,7 +318,7 @@ class MPIArray(np.ndarray):
         arr = np.ndarray.__new__(cls, lshape, *args, **kwargs)
 
         # Set attributes of class
-        arr._global_shape = global_shape
+        arr._global_shape = tuple(global_shape)
         arr._axis = axis
         arr._local_shape = tuple(lshape)
         arr._local_offset = tuple(loffset)
@@ -327,6 +329,60 @@ class MPIArray(np.ndarray):
     @property
     def global_slice(self):
         return _global_resolver(self)
+
+    @classmethod
+    def from_numpy_array(cls, array, axis=0, root=None, comm=None):
+        """Create a distributed MPIArray object from a numpy array.
+
+        Parameters
+        ----------
+        array : np.ndarray
+            Array from which to create a distributed MPIArray.
+        axis : integer, optimal
+            Axis over which the created MPIArray is distributed. Default 0.
+        root : interger or None, optimal
+            If None, the created MPIarray will get data from the corresponding
+            section from this process's `array` (so the `array` in all processes
+            should usually be the same), else the MPIArray will be created from
+            the `array` hold in the 'root' process. Default None.
+        comm : MPI.Comm, optional
+            The communicator over which the array is distributed. If `None`
+            (default), use `MPI.COMM_WORLD`.
+
+        Returns
+        -------
+        dist_array : MPIArray
+            An MPIArray view of the input.
+
+        """
+
+        if comm is None:
+            comm = mpiutil.world
+
+        local_array = mpiutil.scatter_array(array, axis=axis, root=root, comm=comm)
+
+        return cls.wrap(local_array, axis, comm=comm)
+
+
+    def to_numpy_array(self, root=0):
+        """Convert the distributed MPIArray to a numpy array.
+
+        Parameters
+        ----------
+        root : interger or None, optimal
+            If None, all processes will retuen the same converted numpy array,
+            otherwise only the `root` process will return the converted numpy array,
+            other process will return None. Default 0.
+
+        Returns
+        -------
+        array : np.ndarray
+            The returned numpy array.
+
+        """
+
+        return mpiutil.gather_array(self.local_array, self.axis, root, self.comm)
+
 
     @classmethod
     def wrap(cls, array, axis, comm=None):
@@ -476,7 +532,7 @@ class MPIArray(np.ndarray):
         return enumerate(range(start, end))
 
     @classmethod
-    def from_hdf5(cls, f, dataset, comm=None):
+    def from_hdf5(cls, f, dataset, axis=0, comm=None):
         """Read MPIArray from an HDF5 dataset in parallel.
 
         Parameters
@@ -485,6 +541,8 @@ class MPIArray(np.ndarray):
             File to read dataset from.
         dataset : string
             Name of dataset to read from. Must exist.
+        axis : integer, optional
+            The distributed axis of the MPIArray.
         comm : MPI.Comm
             MPI communicator to distribute over. If `None` optional, use
             `MPI.COMM_WORLD`.
@@ -508,12 +566,15 @@ class MPIArray(np.ndarray):
         dset = fh[dataset]
         gshape = dset.shape
         dtype = dset.dtype
-        dist_arr = cls(gshape, axis=0, comm=comm, dtype=dtype)
+        dist_arr = cls(gshape, axis=axis, comm=comm, dtype=dtype)
 
-        start = dist_arr.local_offset[0]
-        end = start + dist_arr.local_shape[0]
+        start = dist_arr.local_offset[axis]
+        end = start + dist_arr.local_shape[axis]
 
-        dist_arr[:] = dset[start:end]
+        slc = [ slice(0, None) ] * len(dist_arr.shape)
+        slc[axis] = slice(start, end)
+
+        dist_arr[:] = dset[tuple(slc)]
 
         if to_close:
             fh.close()
